@@ -1,0 +1,5 @@
+name: quarkus-asciidoc
+title: Asciidoc
+version: dev
+nav:
+  - modules/ROOT/nav.adoc

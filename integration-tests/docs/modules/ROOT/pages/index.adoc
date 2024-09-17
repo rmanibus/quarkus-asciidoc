@@ -1,0 +1,481 @@
+= Quarkus Temporal
+
+include::./includes/attributes.adoc[]
+
+A Quarkus extension that lets you utilize https://temporal.io/[Temporal], orchestrating both mission-critical and mainstream workloads.
+
+== Installation
+
+If you want to use this extension, you need to add the `io.quarkiverse.temporal:quarkus-temporal` extension first to your build file.
+
+For instance, with Maven, add the following dependency to your POM file:
+
+[source,xml,subs=attributes+]
+----
+<dependency>
+    <groupId>io.quarkiverse.temporal</groupId>
+    <artifactId>quarkus-temporal</artifactId>
+    <version>{project-version}</version>
+</dependency>
+----
+
+[#getting-started]
+== Getting Started
+
+Activities and workflows are automatically detected. Simply implement an interface annotated with `@ActivityInterface` or `@WorkflowInterface`.
+
+=== Create a Workflow
+
+[source,java]
+----
+@WorkflowInterface
+public interface SendEmailWorkflow {
+
+    @WorkflowMethod
+    public void run(WorkflowData data);
+
+    @QueryMethod
+    public EmailDetails details();
+}
+----
+
+The following workflow definition will be automatically bound to the default worker:
+
+[source,java]
+----
+public class SendEmailWorkflowImpl implements SendEmailWorkflow {
+    @Override
+    public void run(WorkflowData data) {
+    }
+}
+----
+
+It is possible to associate the workflow with one or more named workers instead by annotating it with @TemporalWorkflow:
+
+[source,java]
+----
+@TemporalWorkflow(workers = "named-worker")
+public class SendEmailWorkflowImpl implements SendEmailWorkflow {
+    @Override
+    public void run(WorkflowData data) {
+    }
+}
+----
+
+If you don't have control over the workflow class, it is also possible to bind it with a worker using the workflow-classes configuration property of the worker.
+
+[source,properties]
+----
+quarkus.temporal.worker.namedWorker.workflow-classes[0]=io.quarkiverse.temporal.SendEmailWorkflowImpl
+----
+
+In this case, it will not be associated with the default worker unless you also bind it explicitely:
+
+[source,properties]
+----
+quarkus.temporal.worker.workflow-classes[0]=io.quarkiverse.temporal.SendEmailWorkflowImpl
+----
+
+Each worker can have at most one implementation of a given workflow, but a workflow can have implementations across multiple workers.
+
+Workflows are not provided as CDI beans because dependency injection into workflow instances is strongly discouraged. Injecting dependencies into workflow instances can lead to changes that are incompatible with persisted histories, resulting in `NonDeterministicException` errors. To provide external configuration to a workflow in a deterministic way, use a Local Activity that returns the configuration to the workflow. Dependency injection into activity instances is allowed, ensuring that the configuration is persisted into the history and remains consistent during replay.
+
+If your project only contains the workflow interfaces, but does not contain the actual workflow implementations, the plugin will assume that the workflow is bound to the default worker.
+If this is not the case, you can hint quarkus about which workers this workflow is bound to by annotating the interface with @TemporalWorkflow directly.
+
+[source,java]
+----
+@WorkflowInterface
+@TemporalWorkflow(workers = "named-worker")
+public interface SendEmailWorkflow {
+
+    @WorkflowMethod
+    public void run(WorkflowData data);
+
+    @QueryMethod
+    public EmailDetails details();
+}
+----
+
+
+=== Create an Activity
+
+[source,java]
+----
+@ActivityInterface
+public interface SendEmailActivities {
+    @ActivityMethod
+    public String sendEmail(EmailDetails details);
+}
+----
+
+The following activity definition will be added automatically to the default worker:
+
+[source,java]
+----
+public class SendEmailActivitiesImpl implements SendEmailActivities {
+
+    @Inject // <1>
+    Mailer mailer;
+
+    @Override
+    public String sendEmail(EmailDetails details) {
+
+    }
+}
+----
+
+<1> CDI Dependency Injection is allowed in activity definition.
+
+It is possible to associate the activity with one or more named workers instead by annotating it with @TemporalActivity:
+
+[source,java]
+----
+@TemporalActivity(workers = "named-worker")
+public class SendEmailActivitiesImpl implements SendEmailActivities {
+    @Override
+    public String sendEmail(EmailDetails details) {
+
+    }
+}
+----
+
+If you don't have control over the activity class, it is also possible to bind it with a worker using the activity-classes configuration property of the worker:
+
+[source,properties]
+----
+quarkus.temporal.worker.namedWorker.activity-classes[0]=io.quarkiverse.temporal.SendEmailActivitiesImpl
+----
+
+In this case, it will not be associated with the default worker unless you also bind it explicitely:
+
+[source,properties]
+----
+quarkus.temporal.worker.activity-classes[0]=io.quarkiverse.temporal.SendEmailActivitiesImpl
+----
+
+Similarly, each worker can have at most one implementation of a given activity, but an activity can have implementations across multiple workers.
+
+
+=== Using the client
+
+[source,java]
+----
+public class MyService {
+
+    @Inject
+    WorkflowClient client; // <1>
+
+    public void startSubscription(WorkflowData data) {
+
+        WorkflowOptions options = WorkflowOptions.newBuilder()
+                .setWorkflowId(data.getEmail())
+                .setTaskQueue("<default>") // <2>
+                .build();
+
+        SendEmailWorkflow workflow = client.newWorkflowStub(SendEmailWorkflow.class, options);
+        WorkflowClient.start(workflow::run,data);
+
+    }
+
+}
+----
+
+<1> The client can be injected as a CDI bean
+<2> The default worker queue is <default>. for named worker, use the name of the worker
+
+=== Stub Injection
+
+It is also possible to inject a workflow stub directly using the TemporalWorkflowStub qualifier:
+
+[source,java]
+----
+public class MyService {
+
+    @Inject
+    @TemporalWorkflowStub(workflowId = "send-email")
+    SendEmailWorkflow workflow;
+
+    public void startSubscription(WorkflowData data) {
+        workflow.run(data);
+    }
+
+}
+----
+
+If the workflow is bound to multiple workers, the worker parameter is required:
+
+[source,java]
+----
+public class MyService {
+
+    @Inject
+    @TemporalWorkflowStub(worker = "<default>", workflowId = "send-email")
+    SendEmailWorkflow workflow;
+
+    public void startSubscription(WorkflowData data) {
+        workflow.run(data);
+    }
+
+}
+----
+
+The workflowId can be set at runtime by injecting a TemporalInstance:
+
+[source,java]
+----
+public class MyService {
+
+    @Inject
+    @TemporalWorkflowStub
+    TemporalInstance<SimpleWorkflow> instance;
+
+    public void startSubscription(WorkflowData data) {
+        SendEmailWorkflow workflow = instance.workflowId("the-workflow-id");
+        workflow.run(data);
+    }
+
+}
+----
+
+== OpenTelemetry
+
+To wire up Temporal to forward traces and spans to Quarkus OpenTelemetry simply add the OpenTelemetry extension to your application.
+
+[source,xml]
+----
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-opentelemetry</artifactId>
+</dependency>
+----
+
+This will enable it by default you can disable it with:
+
+[source,properties]
+----
+quarkus.temporal.telemetry.enabled=false
+----
+
+== Micrometer Metrics
+
+To wire up Temporal to forward Micrometer metrics to Quarkus OpenTelemetry simply add the Micrometer extension to your application.
+
+[source,xml]
+----
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-micrometer-registry-prometheus</artifactId>
+</dependency>
+----
+
+This will enable it by default you can disable it with:
+
+[source,properties]
+----
+quarkus.temporal.metrics.enabled=false
+----
+
+== Context Propagation
+
+You can use an MDC (Mapped Diagnostic Context) Context Propagator to propagate information from the workflow client to workflow execution, workflow to activity, workflow to child workflow, and workflow to child thread created using `Async`.
+
+To enable the MDC propagator or any custom propagators simply produce a CDI
+bean implementing the `ContextPropagator` interface.
+
+[source,java]
+----
+package om.yourcompany;
+
+import java.util.HashMap;
+import java.util.Map;
+
+import jakarta.inject.Singleton;
+
+import org.apache.commons.lang3.StringUtils;
+import org.jboss.logging.Logger;
+import org.slf4j.MDC;
+
+import com.google.protobuf.ByteString;
+
+import io.quarkus.arc.Unremovable;
+import io.temporal.api.common.v1.Payload;
+import io.temporal.common.context.ContextPropagator;
+import io.temporal.common.converter.GlobalDataConverter;
+
+/**
+ * A {@link ContextPropagator} implementation that propagates the SLF4J MDC
+ * (Mapped Diagnostic Context) across Temporal workflow and activity boundaries.
+ * This class ensures that MDC entries with keys starting with "X-" are
+ * propagated.
+ */
+@Singleton
+@Unremovable
+public class MDCContextPropagator implements ContextPropagator {
+
+    private static final Logger LOG = Logger.getLogger(MDCContextPropagator.class);
+
+    /**
+     * Gets the name of the context propagator.
+     *
+     * @return the name of the context propagator, which is the fully qualified
+     *         class name.
+     */
+    @Override
+    public String getName() {
+        return this.getClass().getName();
+    }
+
+    /**
+     * Retrieves the current MDC context to be propagated.
+     *
+     * @return a map containing the current MDC context, filtered to include only
+     *         entries with keys starting with "X-".
+     */
+    @Override
+    public Object getCurrentContext() {
+        Map<String, String> context = new HashMap<>();
+        Map<String, String> mdcContext = MDC.getCopyOfContextMap();
+        if (mdcContext != null) {
+            mdcContext.entrySet().stream()
+                    .filter(entry -> entry.getKey().startsWith("X-"))
+                    .forEach(entry -> context.put(entry.getKey(), entry.getValue()));
+        }
+        return context;
+    }
+
+    /**
+     * Sets the current MDC context from the given context map.
+     *
+     * @param context the context map containing MDC entries to be set.
+     */
+    @Override
+    public void setCurrentContext(Object context) {
+        if (context instanceof Map) {
+            @SuppressWarnings("unchecked")
+            Map<String, String> contextMap = (Map<String, String>) context;
+            contextMap.forEach(MDC::put);
+        }
+    }
+
+    /**
+     * Serializes the given context map to a map of Payloads.
+     *
+     * @param context the context map containing MDC entries to be serialized.
+     * @return a map of Payloads representing the serialized context.
+     */
+    @Override
+    public Map<String, Payload> serializeContext(Object context) {
+        if (!(context instanceof Map)) {
+            return new HashMap<>();
+        }
+        @SuppressWarnings("unchecked")
+        Map<String, String> contextMap = (Map<String, String>) context;
+        Map<String, Payload> serializedContext = new HashMap<>();
+        contextMap.forEach((key, value) -> GlobalDataConverter.get().toPayload(value)
+                .ifPresent(payload -> serializedContext.put(key, payload)));
+        return serializedContext;
+    }
+
+    /**
+     * Deserializes the given map of Payloads to a context map.
+     *
+     * @param context the map of Payloads to be deserialized.
+     * @return a context map containing the deserialized MDC entries.
+     */
+    public Object deserializeContext(Map<String, Payload> context) {
+        Map<String, String> contextMap = new HashMap<>();
+        context.forEach((key, payload) -> {
+
+            // Handle empty {} when the data value is empty
+            // Adding opentracing seems to add a new value with empty data
+            // and the dataconverter throws an error
+            // This actually might be a configuration error from earlier
+            // but leaving in right now
+            //
+            // {_tracer-data=metadata {
+            // key: "encoding"
+            // value: "json/plain"
+            // }
+            // data: "{}"
+            // }
+            try {
+                String payloadValue = StringUtils.EMPTY; // default value
+
+                // Convert data to string to compare
+                ByteString data = payload.getData();
+
+                // Check the value to see if it "empty"
+                if (data != null && !data.isEmpty()) {
+
+                    // Check if the value isn't {}'s
+                    if (!StringUtils.equals("{}", data.toStringUtf8())) {
+                        payloadValue = GlobalDataConverter.get().fromPayload(payload, String.class, String.class);
+                    }
+                }
+
+                // Add the value into the map
+                contextMap.put(key, payloadValue);
+            } catch (Exception e) {
+                LOG.warnf("Couldn't parse MDC Context Data Key %s", key);
+            }
+        });
+        return contextMap;
+    }
+}
+----
+
+== Interceptors
+
+Interceptors are a mechanism for modifying inbound and outbound SDK calls. Interceptors are commonly used to add tracing and authorization to the scheduling and execution of Workflows and Activities. You can compare these to "middleware" in other frameworks.
+
+To enable interceptors simply produce a CDI bean implementing the `WorkflowClientInterceptor` interface or `WorkerInterceptor` interface. Interceptors can be ordered by declaring a `@Priority` on each interceptor, so they are executed in that order.
+
+[source,java]
+----
+package com.yourcompany;
+
+import java.util.Optional;
+
+import jakarta.annotation.Priority;
+import jakarta.inject.Singleton;
+
+import io.quarkus.arc.Unremovable;
+import io.temporal.api.common.v1.WorkflowExecution;
+import io.temporal.client.ActivityCompletionClient;
+import io.temporal.client.WorkflowOptions;
+import io.temporal.client.WorkflowStub;
+import io.temporal.common.interceptors.WorkflowClientCallsInterceptor;
+import io.temporal.common.interceptors.WorkflowClientInterceptor;
+
+@Singleton
+@Unremovable
+@Priority(1)
+public class TestWorkflowClientInterceptor implements WorkflowClientInterceptor {
+    @Override
+    public WorkflowStub newUntypedWorkflowStub(String workflowType, WorkflowOptions options, WorkflowStub next) {
+        return next;
+    }
+
+    @Override
+    public WorkflowStub newUntypedWorkflowStub(WorkflowExecution execution, Optional<String> workflowType, WorkflowStub next) {
+        return next;
+    }
+
+    @Override
+    public ActivityCompletionClient newActivityCompletionClient(ActivityCompletionClient next) {
+        return next;
+    }
+
+    @Override
+    public WorkflowClientCallsInterceptor workflowClientCallsInterceptor(WorkflowClientCallsInterceptor next) {
+        return next;
+    }
+}
+
+----
+
+[[extension-configuration-reference]]
+== Extension Configuration Reference
+
+include::includes/quarkus-temporal.adoc[leveloffset=+1, opts=optional]
